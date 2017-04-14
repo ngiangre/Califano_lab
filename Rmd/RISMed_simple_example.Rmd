@@ -1,0 +1,57 @@
+---
+title: "Pubmed searching with RISMed: A Simple Example"
+author: by Nick Giangreco
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Literature searches within R
+
+**The package *RISMed* allows you to do pubmed, or any NCBI database, searches with results from R seamlessly within the R environment. This tutorial will go through a simple example of searching a term of interest in PubMed with *RISMed* functions.**
+
+**I first set my environment and load my data,**
+
+```{r, echo=TRUE, eval=TRUE}
+#install.packages("RISmed") #if not already installed
+library(RISmed)
+```
+
+**Let's say I'm interested in finding literature about Temozolamide, a common drug used to treat Glioblastoma. **
+
+```{r,echo=TRUE,eval=TRUE}
+search_query <- EUtilsSummary("Temozolamide")
+
+print(search_query)
+```
+**This shows my search that will be submitted to PubMed. In this case, it looks for "Temozolamide" in all fields of PubMed submissions.**
+
+
+**The summary function will yield the actual query to pubmed, based on the keyword. The EUtils wrapper function will output the query results number. Using summary(), I can see how many results I get.**
+```{r,echo=TRUE,eval=TRUE}
+summary(search_query)
+```
+**88 is exactly how many articles I would retrieve if I entered "Temozolamide[All Fields]" in the search box to PubMed.**
+
+**Now I'd like to retrieve all PubMed articles from 2016.**
+
+```{r,echo=TRUE,eval=TRUE}
+search_query <- EUtilsSummary("Temozolamide",mindate=2016,maxdate=2016)
+
+records<- EUtilsGet(search_query)
+```
+
+**Now I can invoke many different functions to look at these records. For example, what are the titles of the articles?**
+```{r,echo=TRUE,eval=TRUE}
+ArticleTitle(records)
+```
+
+**Cool, I think the first entry would be a great article to read! What's the PMID?**
+
+```{r,echo=TRUE,eval=TRUE}
+PMID(records)[1]
+```
+
+**Gee, isn't this great I can do literature searches right in my R console!? Thanks Stephanie Kovalchik of Victoria University for creating *RISMed*!**

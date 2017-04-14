@@ -1,0 +1,39 @@
+---
+title: "Mining ClinicalTrials.gov with *rclinicaltrials*"
+author: "by Nick Giangreco"
+output: html_notebook
+---
+
+**It would be very helpful to mine current clinical trials for promising but experimental drugs. *rclinicaltrials*[https://github.com/sachsmc/rclinicaltrials] is an R package that will allow you to mine for drugs within the US clinical trials database. **
+
+**This is an ongoing development project. Contact the author and post an issue to get it up and running!**
+
+Setting up environment
+```{r,eval=T,echo=T}
+install.packages("devtools")
+library(devtools)
+install_github("sachsmc/rclinicaltrials")
+library(rclinicaltrials)
+```
+
+I'm interested in Temozolamide-how many clinical studies are listed in the database?
+```{r,eval=T,echo=T}
+drug="Temozolamide"
+clinicaltrials_count(query = drug)
+tem<-clinicaltrials_download(query = drug)
+```
+This is the same number as when you enter 'Temozolamide' into the clinicaltrrials.gov search box. 
+
+
+What is the status of the trials?
+```{r,echo=T,eval=T}
+tem<-clinicaltrials_search(query = drug)
+status<-tem$status.text
+status
+```
+
+
+What are the titles of the completed trials?
+```{r,echo=T,eval=T}
+tem$title[tem$status.text=="Completed"]
+```

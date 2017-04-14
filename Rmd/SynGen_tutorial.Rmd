@@ -1,0 +1,505 @@
+
+---
+title: "SynGen: overview"
+author: by Nick Giangreco
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#What is SynGen 
+
+  **Syngen is a new algorithm developed in the Califano lab for inferring synergistic interactions between treatments (drugs). SynGen works in two parts. Computing a relationship between a drug and patient signature and then estimates synergy between two drug signatures found to significantly treat the patient signature found in the former step. **
+  
+  **In a given patient, the regulator activities are ranked from highest to lowest estimated activity. In a given drug signature, the genes are matched in the ranked signature from the patient. Then there's bifurcation. First, the tumor signature (as derived above using the viper scores in the patient) is compared to the drug signature (as derived from above using the viper scores in the perturbed cell line). The distance is calculated between the two signatures, where larger distance means the regulator activities after drug perturbation are opposite, or close to opposite, to regulators in the tumor signature and vice versa. Second, the drug synergy is estimated. The procedure is actually calculating how much the drugs complement each other-if drug A produces a perturbation exactly like drug B then there's no synergy by definition. If drug A produces a similar perturbation as drug B so as to have similar activity but in different targets, then there's said to be synergy. If there's synergy, by definition the perturbations by the two drugs have a better reversal of the tumor signature and thus might have a better treatment affect.**
+
+  
+  **This Rmarkdown document  will go through the main function of SynGen, including the original code, called *phenoDrug* to give a transparent view of the inference method and understand each section of the function.**
+
+#Load your data
+
+**I'm loading data that I'm using for the GBM project. Then I'm also loading the functions directly so I can go through the code sequentially. (Note: you may have to change the paths so that you can run this document on your machine).**
+```{r}
+load("Z:/npg2108/RDAs/syngen.RDa")
+#load("/Volumes/ac_lab_scratch/npg2108/RDAs/syngen.RDa")
+path="I:/npg2108/syngen-svn-2/syngen-svn-2_mod/R/"
+#path="/Volumes/ac_lab/npg2108/syngen-svn-2/syngen-svn-2_mod/R/"
+source(paste0(path,"internal.R"))
+source(paste0(path,"syngen.R"))
+```
+**The tumor viper matrix contains the inferred protein activity (VIPER) scores for the 41 patients with GBM across the 5923 regulators.**
+```{r}
+dim(vprgbm_rpkm)
+```
+**The drug viper matrix contains the the inferred protein activity (VIPER) scores for the 277 drug perturbations across 2447 regulators in the u87 cell line.**
+```{r}
+dim(sub_vpmat)
+```
+**Pre-processing: first I need to make sure the genes match in both matrices before giving to syngen.** 
+```{r, echo=FALSE}
+dr<-sub_vpmat[which(rownames(sub_vpmat) %in% rownames(vprgbm_rpkm)),]
+ds<-vprgbm_rpkm[which(rownames(vprgbm_rpkm) %in% rownames(sub_vpmat)),]
+```
+**So the preprocessed tumor viper matrix,**
+```{r}
+dim(dr)
+```
+**and drug viper matrix**
+```{r}
+dim(ds)
+```
+**contain the same regulators.**
+
+#Syngen function: phenoDrug
+  **phenoDrug is the main function call for SynGen. The function predicts single agent and 2-way combinations that may induce reversal of the tumor signature.**
+  
+**The first two arguments are the phenotype viper vector or matrix (ds) and then the drug viper matrix (dr). In our case, since we want to do our predictions for a single patient, we will only give a single column of the matrix as an example. In practice, if our goal is to predict for all patients individually, I would execute a loop or better yet some kind of parallelization.**
+```{r}
+phsig<-ds[,"GBM61"]
+drugsig<-dr
+```
+**We will indicate the method to use (there's three to choose from) to be 'complemental' to estimate synergy. This method is preferred because we can think of synergy as complementation-two entities working together to induce a larger effect than just adding two individual effects together.**
+```{r}
+method<-"complemental"
+```
+**We will initialize the other parameters to their default settings indicated in help("phenoDrug").**
+```{r}
+nn<-NULL
+ws=2
+similarity<-"two.sided"
+cutoff<-0.01
+scc<-NULL
+phdistance<-TRUE
+score<-1
+ints<-0
+symetric<-TRUE
+```
+**The function is computed in the following sections:**
+
+**1. Initializating**
+
+**2. Compatibilizing the phenotype signature and drug signature**
+
+**3. Computing phenotype / drug association**
+
+**4 and 5. Selecting the significant compounds and estimating expected p-value for additive effect**
+
+**6. Similarity between drugs**
+
+**7. Defining all drug combinations**
+
+**8. Computing the synergy score**
+
+##1. Initializing
+This step corrects formatting and variable initialization such as:
+
+* Providing a score if none is given.
+
+* Converting the phenotype object into a matrix if only a vector is given (as in our case).
+
+* Setting the number of genes to use for the reciprical enrichment analysis (when determining if regulator activities are juxtaposed between signatures) to 10% of the number of shared genes between the matrices (default).
+
+* Putting the drug viper matrix into a list as the first and only element of that list. 
+
+```{r,eval=FALSE,echo=FALSE}
+#testing for the cbind warning
+#phsig<-vprgbm_rpkm
+#drugsig<-sub_vpmat
+
+#make score into duplicated vector of two instead of 1
+    if (length(score)==1) score <- rep(score, 2)
+#if phsig is a vector i.e. does not have columns like a matrix, convert into a matrix
+    if (is.null(ncol(phsig))) {
+        phsig <- matrix(phsig, length(phsig), 2, dimnames=list(names(phsig), NULL))
+    }
+#if nn is null and ws (weight used in weighting higher magnitude activity scores more doownstream) is 0, convert to the default value of 10% of shared genes between the phenotype and drug signatures. Used for the reprical enrichment
+    if (is.null(nn) & ws==0) {
+        nn <- round(length(which(rownames(phsig) %in% rownames(drugsig)))/10)
+    }
+#store phenotype signature into 'ds' 
+    ds <- phsig
+#store drug matrix as the first element of a list
+    if (!is.list(drugsig)) drugsig <- list(drugsig)
+```
+
+```{r}
+    if (length(score)==1) score <- rep(score, 2)
+    if (is.null(ncol(phsig))) {
+        phsig <- matrix(phsig, length(phsig), 2, dimnames=list(names(phsig), NULL))
+    }
+    if (is.null(nn) & ws==0) {
+        nn <- round(length(which(rownames(phsig) %in% rownames(drugsig)))/10)
+    }
+    ds <- phsig
+    if (!is.list(drugsig)) drugsig <- list(drugsig)
+```
+
+##2. Compatibilizing the drug matrix with the phenotype signature
+In this step, all the drug names in the drug viper matrix are made sure to be unique (not occuring in more than one column) and the gene names are confirmed to be shared and having the same position in both matrices (excluding duplicates). Unfortunately, this step only checks shared genes in the drug matrix, not the phenotype matrix. Downstream, this fabricates data when computing similarity between the signatures, so it's imperative to do this pre-processing prior to inputting the matrices into phenoDrug. The code should be modified.  
+
+```{r,eval=FALSE,echo=FALSE}
+#before: dim(drugsig[[1]])
+#getting unique drugs
+    drugs <- unique(unlist(lapply(drugsig, colnames), use.names=F))
+#counting how many times each gene in the drug matrix occurs
+    genes <- table(unlist(lapply(drugsig, rownames), use.names=F))
+#getting only genes that occur once in the drug matrix AND occur in the phenotype matrix
+    genes <- names(genes)[genes==length(drugsig) & names(genes) %in% rownames(phsig)]
+#for the drug matrix, matching the unique drug gene position from the drug matrix
+    #and also the unique drug position in the original drug matrix
+    drugsig <- lapply(drugsig, function(x, drugs, genes) {
+        x[match(genes, rownames(x)), ][, match(drugs, colnames(x))]
+    }, drugs=drugs, genes=genes) 
+#after: dim(drugsig[[1]]) #took out duplicate drugs and genes.
+#
+#I feel like it should remove the unmatched genes too because then you're adding erroneous values to unexisting genes in the assay with fewer genes when you're computing viperSimilarity
+    #Should these lines of code be added?
+    #phsig.genes<-rownames(phsig)
+    #drugsig.genes<-rownames(drugsig[[1]])
+    #shared.indices<-phsig.genes %in% drugsig.genes
+    #phsig<-phsig[shared.indices,]
+```
+
+```{r}
+    drugs <- unique(unlist(lapply(drugsig, colnames), use.names=F))
+    genes <- table(unlist(lapply(drugsig, rownames), use.names=F))
+    genes <- names(genes)[genes==length(drugsig) & names(genes) %in% rownames(phsig)]
+    drugsig <- lapply(drugsig, function(x, drugs, genes) {
+        x[match(genes, rownames(x)), ][, match(drugs, colnames(x))]
+    }, drugs=drugs, genes=genes) 
+```
+
+##3. Computing phenotype / drug association
+Preceding this step are all the necessary pre-processing such as initializing parameters, formatting data objects, and adjusting the phenotype and drug matrices for sharing genes with having the same position as well. 
+In this step, now we are comparing the phenotype and drug signature, where this is done with the *viperSimilarity* function. Essentially, *viperSimilarity* is analogous to the rotation matrix for PCA in that the features are reduced. But instead of capturing the maximum variance, the reduction method measures the similarity of the signatures and assigns a score. In the implementation it estimates the similarity of the inverse signature-biologically we want to know if the drug signature (regulator activities) is a reversal of the tumor signature. Thus, if the inverse of the signature is very similar, the drug is likely to "treat" the phenotype. But before estimation, the phenotype and viper signatures have to be standardized so that they can be compared. For example, if we plot the distribution of the phenotype distribution,
+
+```{r, echo=FALSE}
+hist(phsig[,1],col="red",main="Phenotype viper signature",xlab="VIPER scores",font=2,font.lab=2,font.axis=2)
+```
+
+and then the distribution for a drug,
+
+```{r, echo=FALSE}
+hist(-drugsig[[1]],col="purple",main="All drug viper scores",xlab="VIPER scores",font=2,font.lab=2,font.axis=2) #showing for each drug also has a normal distribution
+```
+
+By viewing the viper scores on the x-axis, you can see that the distributions have very different ranges. *viperSimilarity* isn't concerned with the difference in range for estimating the signature similarity, but only the ranking of regulator activity in the signatures. Thus, standardization of the two signatures is done, so each signature will then lie between -1 and 1 (the overall shape is the same but the range is standardized so comparisons of the rankings can be made). After standardization, the distributions are then z transformed and with many other transformations we get an estimate for how the drug signatures relate to the signature of the phenotype.
+
+```{r, echo=FALSE,eval=FALSE}
+#####viperSimilarity function#####
+#column 1 is the phenotype viper signature and column 2 is the drug viper signature (matrix).
+#--->why isn't it corrected in step 2 for phsig to have the same genes as the drug matrix? I feel like you're adding erroneous information
+    x<-cbind(phsig[,1],-drugsig[[1]]) #dim 2435 277
+#NA values are filled in with 0.
+    x[is.na(x)] <- 0
+    xw <- x
+#normalizing each value in a column (value of a regulator across drugs) by the maximum value of a regulator for a given drug. Pretty much transforms the range of all regulator, drug pairs to between -1 and 1 as shown in the histogram. Seems as if it is the rank of regulator activity across all drug perturbations.
+#--->should t(xw) just be xw? Are you dividing through the columns in t(xw)?
+    xw <- t(t(xw)/apply(abs(x), 2, max))
+    #hist(xw) # dim 2435 277
+    #decreases the variance of the distribution of regulator activities across drugs.
+    xw <- sign(xw)*abs(xw)^ws # dim 2435 277
+    #hist(xw)
+    #for each drug, sum all regulator activities and square so that higher activities add more and smaller activites add less to a drug activity signature.
+    nes <- sqrt(colSums(xw^2)) #length 277
+    #back to xw with dim 2435 277, the values are scaled by the colsums of the absolute activites so that the 277 drug signatures are standardized. 
+    xw <- scale(xw, center=FALSE, scale=colSums(abs(xw)))
+    #hist(xw)
+    #the original x matrix with the phenotype signature vector combined with the drug viper matrix-the regulators in each column are now ranked and divided by the total so it gives a fractional value from 0 to 1. Then, this is z transformed to give the quantile that a given regulator activity is out of all activites across the patient + drugs. 
+    t2 <- qnorm(apply(x, 2, rank)/(nrow(x)+1)) #dim 2435 277
+    #hist(t2)
+    #matrix multiplication of the z score of a regulator in a drug and the standardized, scaled  activity.
+    vp <- t(xw) %*% t2 #dim 277 277
+    #multiplying by the nes, which is weighting higher and lower activities. 
+    vp <- vp * nes
+    #removing diagonal
+    tmp <- cbind(vp[lower.tri(vp)], t(vp)[lower.tri(vp)])
+    #--->extra weighting of higher/lower values-why? adding together the two halves because of their redundancy. 
+    tmp <- rowSums(tmp*tmp^2)/rowSums(tmp^2)
+    #putting scores back into matrix
+    vp[lower.tri(vp)] <- tmp
+    vp <- t(vp)
+    vp[lower.tri(vp)] <- tmp
+    class(vp) <- "signatureDistance"
+    #same object as in original code-check!
+    svp<-as.matrix(scale(vp)[, -1][1, ])
+    #Normally distributed histogram but density shows it bimodal
+    plot(density(svp),col="black",main="Scaled estimated drug score",xlab="Estimated     scores",font=2,font.lab=2,font.axis=2)
+```
+
+Then, z-scores can be estimated with the associated p-value for a given drug activity from all 277 activities. This gives a bimodal distribution, effectively indicating most regulators have either higher/lower activity with a low p-value (less likely to observe regulators with higher/lower activity) and regulators showing little activity have p-values closer to 1 (regulators with these activities are often observed).
+
+```{r, eval=FALSE,echo=FALSE}
+#####cortest function#####
+#fcn for z transformation
+r<-svp
+n<-length(genes)
+#transformations
+#log(1+r) doesn't change the distribution much. Range is -.5 to .5. and max height is 13. Still bimodal density
+plot(density(log(1+r)),col="black",main="Log transformed estimated drug score",xlab="Estimated scores",font=2,font.lab=2,font.axis=2)
+#log/log increases the range a little bit. Range is -.15 to .15 and max height is 7. 
+plot(density(log((1+r)/(1-r))),col="black",main="Log/log transformed estimated drug score",xlab="Estimated scores",font=2,font.lab=2,font.axis=2)
+#(log/log)/sqrt increases the range to -4 to 4 and max height is .28. 
+plot(density(log((1+r)/(1-r))/2*sqrt(n-3)),col="black",main="(Log/log)/sqrt transformed estimated drug score",xlab="Estimated scores",font=2,font.lab=2,font.axis=2)
+z <- log((1+r)/(1-r))/2*sqrt(n-3)
+#getting p-value for estimated drug score in population of 276
+p <- pnorm(abs(z), lower.tail=F)*2
+#probability density. Ranges from 0 to 1 with max height .18. 
+plot(density(p),col="black",main="Probability of observed estimated drug scores",xlab="Estimated scores",font=2,font.lab=2,font.axis=2)
+l<-list(z=z, p.value=p)
+#same as original code object-check!
+d<-rowMeans(l$z)
+```
+
+```{r,eval=FALSE,echo=FALSE}
+    if (phdistance) {
+        tmp <- sapply(drugsig, function(x, phsig, similarity, nn, ws) {
+            scale(viperSimilarity(cbind(phsig, -x), nn=nn, method=similarity, ws=ws, symetric=symetric))[, -1][1, ]
+        }, phsig=phsig[, 1], nn=nn, similarity=similarity, ws=ws)
+        ds <- rowMeans(cortest(tmp, length(genes), alternative="greater")$z)
+    }
+    if (is.null(nrow(ds))) {
+        ds <- matrix(ds, length(ds), 2, dimnames=list(names(ds), NULL))
+    }
+    dnes <- ds
+    ds1 <- max(abs(ds))
+    ds <- pnorm(ds, lower.tail=F)
+    hist(ds[,1],main="Probability distribution",xlab="Probabilities",font=2,font.lab=2,font.axis=2)
+```
+
+```{r}
+    if (phdistance) {
+        tmp <- sapply(drugsig, function(x, phsig, similarity, nn, ws) {
+            scale(viperSimilarity(cbind(phsig, -x), nn=nn, method=similarity, ws=ws, symetric=symetric))[, -1][1, ]
+        }, phsig=phsig[, 1], nn=nn, similarity=similarity, ws=ws)
+        ds <- rowMeans(cortest(tmp, length(genes), alternative="greater")$z)
+    }
+    if (is.null(nrow(ds))) {
+        ds <- matrix(ds, length(ds), 2, dimnames=list(names(ds), NULL))
+    }
+    dnes <- ds
+    ds1 <- max(abs(ds))
+    ds <- pnorm(ds, lower.tail=F)
+```
+
+```{r,echo=FALSE}
+hist(ds[,1],main="Probability distribution of observing \nthe 277 drug activities",xlab="Probability",font=2,font.lab=2,font.axis=2)
+```
+
+##4 and 5. Selecting the significant compounds and computing expected p-value for additive effect
+In this step, the p-values from the bimodal distribution shown earlier are converted to -log10 units. Only drugs that reach the cutoff, meaning drugs that show significant inversion of the drug viper signatures to the phenotype viper signature, are used. This is where the additive effect of drugs are estimated, based on multiplying the probabilities of each drug to each other. This yields a n x n matrix of drugs giving the expected p-value for additive effect.
+```{r,eval=FALSE,echo=FALSE}
+#if cutoff is a probability, make cutoff the number of genes less than that probability 
+    if (cutoff<1) cutoff <- colSums(ds<cutoff)
+    if (cutoff[1]>1) {
+        if (length(cutoff)==1) cutoff <- rep(cutoff, 2)
+#convert probabilities to -log10 units and include genes only within the cutoff
+        dsf <- lapply(1:2, function(i, ds, cutoff) {
+            -log10(ds[order(ds[, i])[1:cutoff[i]], i])
+        }, ds=ds, cutoff=cutoff)
+        names(dsf) <- names(cutoff)
+        topsigdrugs<-dsf[[1]]
+        lentopsigdrugs<-length(dsf[[1]])
+        topsigdrugnames<-names(topsigdrugs)
+        reps<-rep(lentopsigdrugs,lentopsigdrugs)
+        drugprobsrepeated<-rep(topsigdrugs, reps)
+        #taking the square root of the matrix that is identical to the single agent probability on the diagonal,
+        #but multiplies each drug probability together to form an n x n matrix
+        #For ex. two drugs with high probability will have a high score and vice versa. 
+        #--->The square root reduces the score so every value is proportionally downweighted. 
+        dm <- sqrt(
+                   matrix(data=topsigdrugs*drugprobsrepeated,
+                          nrow=lentopsigdrugs,
+                          ncol=lentopsigdrugs, 
+                          dimnames=list(topsigdrugnames, topsigdrugnames)
+                        )
+                   )
+    }
+```
+
+```{r}
+    if (cutoff<1) cutoff <- colSums(ds<cutoff)
+    if (cutoff[1]>1) {
+        if (length(cutoff)==1) cutoff <- rep(cutoff, 2)
+        dsf <- lapply(1:2, function(i, ds, cutoff) {
+            -log10(ds[order(ds[, i])[1:cutoff[i]], i])
+        }, ds=ds, cutoff=cutoff)
+        names(dsf) <- names(cutoff)
+        dm <- sqrt(matrix(dsf[[1]]*rep(dsf[[2]], rep(length(dsf[[1]]), length(dsf[[2]]))), length(dsf[[1]]), length(dsf[[2]]), dimnames=list(names(dsf[[1]]), names(dsf[[2]]))))
+    }
+```
+
+##6. Similarity between drugs
+This is similar to step 3 but now we are estimating the similarity of drugs in the context of treating the tumor. 
+```{r,echo=FALSE,eval=FALSE}
+#go right into the lapply
+    ddtmp <- lapply(drugsig, function(drugsig, dm, nn, ws) {
+      sigdrugnames<-rownames(dm)
+      alldrugnames<-colnames(drugsig)
+      #matching sigdrugnames in drug viper matrix
+      c1<-filterColMatrix(drugsig, match(sigdrugnames, alldrugnames))
+      #doing viper similarity of the viper signature of the sign. drugs
+      tmp <- viperSimilarity(cbind(c1, c1), nn=nn, ws=ws, method="two.sided")  
+      #z scores and associated p-values for estimating drug-drug similarity. The NaN produced is fine-only for one drug pair on the diagonal which we don't care about since the similarity of two identical drugs have infinite similarity. 
+      cortest(scale(tmp)[1:nrow(dm), ][, (nrow(dm)+1):sum(dim(dm))], nrow(drugsig))$z
+    }, dm=dm, nn=nn, ws=ws)
+    ddtmp1 <- sapply(ddtmp, as.vector)
+    #Taking an absolute value of the weighted average of all the drug scores. This does nothing if ints==0 except take the absolute value. 
+    ddtmp2 <- apply(ddtmp1, 1, function(x, ints) {
+        weighted.mean(abs(x), 1/abs(x)^ints, na.rm=T)
+    }, ints=ints)
+    #makes a symmetric matrix
+    #this object makes the ortho list. Pretty much just the expected p-values for the additive drug effect. 
+    dd <- matrix(ddtmp2, 
+                 nrow=nrow(ddtmp[[1]]), 
+                 ncol=ncol(ddtmp[[1]]), 
+                 dimnames=list(rownames( ddtmp[[1]]), colnames(ddtmp[[1]]) ) )
+    #removes rows,columns with NAs if any
+    dd <- dd[!is.na(rownames(dd)), ][, !is.na(colnames(dd))]
+    #removes original object-clears memory
+    rm(ddtmp)
+```
+
+```{r}
+    ddtmp <- lapply(drugsig, function(drugsig, dm, nn, ws) {
+        tmp <- viperSimilarity(cbind(filterColMatrix(drugsig, match(rownames(dm), colnames(drugsig))), filterColMatrix(drugsig, match(colnames(dm), colnames(drugsig)))), nn=nn, ws=ws, method="two.sided")        
+        cortest(scale(tmp)[1:nrow(dm), ][, (nrow(dm)+1):sum(dim(dm))], nrow(drugsig))$z
+    }, dm=dm, nn=nn, ws=ws)
+    ddtmp1 <- sapply(ddtmp, as.vector)
+    ddtmp1 <- apply(ddtmp1, 1, function(x, ints) {
+        weighted.mean(abs(x), 1/abs(x)^ints, na.rm=T)
+    }, ints=ints)
+    dd <- matrix(ddtmp1, nrow(ddtmp[[1]]), ncol(ddtmp[[1]]), dimnames=list(rownames(ddtmp[[1]]), colnames(ddtmp[[1]])))
+    dd <- dd[!is.na(rownames(dd)), ][, !is.na(colnames(dd))]
+    rm(ddtmp)
+```
+
+##7. Defining all drug combinations
+This step just computes all combinations of the drugs that significantly differ from the tumor signature. 
+```{r,eval=FALSE,echo=FALSE}
+#making all combinations of the sig drugs
+    cname <- NULL
+#all but last drug in row of matrix
+    rn <- rownames(dd)[-1]
+    #goes through all but last drug in column of matrix
+    for (i in colnames(dd)[1:(ncol(dd)-1)]) {
+        cname <- rbind(cname, cbind(rn, rep(i, length(rn))))
+        rn <- rn[-1]
+    }
+```
+
+```{r}
+    cname <- NULL
+    rn <- rownames(dd)[-1]
+    for (i in colnames(dd)[1:(ncol(dd)-1)]) {
+        cname <- rbind(cname, cbind(rn, rep(i, length(rn))))
+        rn <- rn[-1]
+    }
+```
+
+##8. Computing the synergy score
+This step computes the estimated drug combination synergy. We will go over the complementation method only. 
+```{r,eval=FALSE,echo=FALSE}
+#really just converts a dataframe to a vector-doesn't take a mean. 
+isig <- rowMeans(
+  sapply(drugsig, function(drugsig, dm, score, phsig, nn, ws, similarity, dnes) 
+   {
+    sigdrugnames<-rownames(dm)
+    alldrugnames<-colnames(drugsig)
+    #getting drug matrix with only the sign. drugs
+    dsig <- filterColMatrix(drugsig, match(sigdrugnames, alldrugnames))
+    reps<-rep(ncol(dsig), ncol(dsig))
+    #expand out matrix from showing sign. drugs once to showing them n x n times. 1,1,.number of sign. drugs..1,2,2,...2, to number of sign. drugs
+    d1 <- dsig[, rep(1:ncol(dsig), reps)]
+    #similar but instead of the same drugs next to each other, sign. drugs are now consecutive. Like 1,2 ... 10, 1,2 ... 10 to 100 columns
+    d2 <- dsig[, rep(1:ncol(dsig), ncol(dsig))]
+    #1st: Take absolute value and normalize d1 by max viper score raised to some score. Then transpose so regulators are columns and drugs are rows. 
+    #2nd: Multiply by the dnes of the significant drugs. The dnes is the z score for the inverse similarity of all drugs to the phenotype. Taking the transpose again gives back the original matrix dimensions with drugs as columns and regulators as rows. 
+    d1sc <- t(
+      t((abs(d1)/max(abs(d1)))^score) * dnes[match(colnames(d1), names(dnes))]
+      )
+    #same as above but for the d2 matrix
+    d2sc <- t(
+      t((abs(d2)/max(abs(d2)))^score) * dnes[match(colnames(d2), names(dnes))]
+      )
+    #This multiplies the original drug viper scores by the dnes. It adds the quantites for d1 and d2 and divides by the total dnes. The density looks normally distributed now
+    #---> what's the rationale for this?
+    isig <- (d1 * d1sc + d2 * d2sc)/(d1sc+d2sc)
+    tmp <- viperSimilarity(cbind(phsig, -isig), nn=nn, ws=ws, method=similarity, symetric=symetric)
+    return(cortest(scale(tmp)[, -1][1, ], nrow(isig))$z)
+   }, 
+  dm=dm, score=score[1], phsig=phsig[, 1], nn=nn, ws=ws, similarity=similarity, dnes=(abs(dnes[, 1])/max(abs(dnes[, 1])))^score[2]
+  )
+  )
+#gets the dnes for sign. drugs
+        dnes1 <- dnes[match(rownames(dm), rownames(dnes)), 1]
+        #expands out dnes like above-here n x n
+        d1 <- dnes1[rep(1:length(dnes1), rep(length(dnes1), length(dnes1)))]
+        #and here n x n but each repeated drug is consecutive
+        d2 <- dnes1[rep(1:length(dnes1), length(dnes1))]
+        #gets max dnes
+        dmax <- apply(cbind(d1, d2), 1, max)
+        #getting -log10 p-values of sign. drugs instead of z scores
+        scs <- dsf[[1]][match(rownames(dm), names(dsf[[1]]))]
+        #expanding out the sign. drugs in scs to n x n both consecutive and repeated and combining as one matrix to get the drug pairs. 
+        scs <- cbind(scs[rep(1:length(scs), rep(length(scs), length(scs)))], scs[rep(1:length(scs), length(scs))])
+        #taking the max -log10 p-value for each drug pair and making a n x n matrix where the -log10 p-value is repeated for the 1st column and 1st row for the 1st drug, then repeated starting from 2,2 for the second drug, and so on until the nth drug only has one value at n,n in the matrix. The matrix is then normalized by the maximum -log10 p-value. 
+        scs <- matrix(apply(scs, 1, max), length(dsf[[1]]), length(dsf[[1]]))/max(scs)
+        #A matrix is made that has the normalized matrix minus the max value multiplied by the -log10 p-value. 
+        syestim <- matrix((isig-dmax)*scs, nrow(dm), ncol(dm))
+        if (length(which(syestim>0))>0) {
+          #some correction for negative values I can't really follow. If no negative values it does nothing. 
+            syestim <- syestim*(syestim>0) + syestim/max(abs(syestim))*max(syestim)*(syestim<0)
+        }
+        colnames(syestim) <- rownames(syestim) <- rownames(dm)
+    diag(syestim) <- 0
+    ortholist <- dd[lower.tri(dd)]
+    #synergy estimation object
+    sylist <- syestim[lower.tri(syestim)]
+    names(sylist) <- names(ortholist) <- paste(cname[, 1], cname[, 2], sep=" x ")
+    res <- list(phdrugs=sapply(dsf, function(x) x), actmatrix=dm, orthomatrix=dd, symatrix=syestim, orthodrugs=ortholist[order(ortholist, decreasing=T)], sydrugs=sylist[order(sylist, decreasing=T)], param=list(nn=nn, similarity=similarity, cutoff=cutoff, method=method, scc=scc))
+    class(res) <- "phenotypeSynergy"
+```
+
+```{r}
+    complemental = {
+        isig <- rowMeans(sapply(drugsig, function(drugsig, dm, score, phsig, nn, ws, similarity, dnes) {
+            dsig <- filterColMatrix(drugsig, match(rownames(dm), colnames(drugsig)))
+            d1 <- dsig[, rep(1:ncol(dsig), rep(ncol(dsig), ncol(dsig)))]
+            d2 <- dsig[, rep(1:ncol(dsig), ncol(dsig))]
+            d1sc <- t(t((abs(d1)/max(abs(d1)))^score) * dnes[match(colnames(d1), names(dnes))])
+            d2sc <- t(t((abs(d2)/max(abs(d2)))^score) * dnes[match(colnames(d2), names(dnes))])
+            isig <- (d1 * d1sc + d2 * d2sc)/(d1sc+d2sc)
+            tmp <- viperSimilarity(cbind(phsig, -isig), nn=nn, ws=ws, method=similarity, symetric=symetric)
+            return(cortest(scale(tmp)[, -1][1, ], nrow(isig))$z)
+        }, dm=dm, score=score[1], phsig=phsig[, 1], nn=nn, ws=ws, similarity=similarity, dnes=(abs(dnes[, 1])/max(abs(dnes[, 1])))^score[2]))
+        dnes1 <- dnes[match(rownames(dm), rownames(dnes)), 1]
+        d1 <- dnes1[rep(1:length(dnes1), rep(length(dnes1), length(dnes1)))]
+        d2 <- dnes1[rep(1:length(dnes1), length(dnes1))]
+        dmax <- apply(cbind(d1, d2), 1, max)
+        scs <- dsf[[1]][match(rownames(dm), names(dsf[[1]]))]
+        scs <- cbind(scs[rep(1:length(scs), rep(length(scs), length(scs)))], scs[rep(1:length(scs), length(scs))])
+        scs <- matrix(apply(scs, 1, max), length(dsf[[1]]), length(dsf[[1]]))/max(scs)
+        syestim <- matrix((isig-dmax)*scs, nrow(dm), ncol(dm))
+        if (length(which(syestim>0))>0) {
+            syestim <- syestim*(syestim>0) + syestim/max(abs(syestim))*max(syestim)*(syestim<0)
+        }
+        colnames(syestim) <- rownames(syestim) <- rownames(dm)
+    }
+    diag(syestim) <- 0
+    ortholist <- dd[lower.tri(dd)]
+    sylist <- syestim[lower.tri(syestim)]
+    names(sylist) <- names(ortholist) <- paste(cname[, 1], cname[, 2], sep=" x ")
+    res <- list(phdrugs=sapply(dsf, function(x) x), actmatrix=dm, orthomatrix=dd, symatrix=syestim, orthodrugs=ortholist[order(ortholist, decreasing=T)], sydrugs=sylist[order(sylist, decreasing=T)], param=list(nn=nn, similarity=similarity, cutoff=cutoff, method=method, scc=scc))
+    class(res) <- "phenotypeSynergy"
+```
+##Output
+**Now you have your output. I'm showing only 2 elements from the 7 element list, but these data frames offer the necessary information.**
+```{r,echo=FALSE}
+cat("Top drugs for patient\n")
+head(data.frame(res$phdrugs[,1]))
+cat("Top synergistic drug combinations for the patient\n")
+head(data.frame(res$sydrugs))
+```

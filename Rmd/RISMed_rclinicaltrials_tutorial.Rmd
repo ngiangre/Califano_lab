@@ -1,0 +1,279 @@
+---
+title: "Pubmed and Clinical trials searching with *RISMed* and *rclinicaltrials*"
+author: by Nick Giangreco
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Literature searches within R
+
+**The package RISMed allows you to do pubmed, or any NCBI database, searches with results from R seamlessly within the R environment. Also, the development package rclinicaltrials allows you to query clinicaltrials.gov for drugs presently or previously involved in a clinical trials. This tutorial will go through integration of these packages to search drugs and synergistic drug combinations resulting from the SynGen analyses.**
+
+**I first set my environment and load my data,**
+
+```{r, echo=TRUE, eval=TRUE}
+#install.packages("RISmed")
+library(RISmed)
+#load("Z:/npg2108/RDAs/syngenv2.RDa")
+load("/Volumes/ac_lab_scratch/npg2108/RDAs/syngenv2.RDa")
+```
+```{r,echo=FALSE,eval=TRUE}
+#####functions#####
+topFreq<-function(syngen,top){
+  
+  #across all patients, get top 5 drugs estimated for highest estimated inversion of the tumor sigtnature
+  allsigdrugspatientlist<-lapply(syngen,function(x){
+      #get drug names from syngen data frames for each patient
+      drugs<-rownames(x$phdrugs)
+      head(drugs,n=top)
+  })
+  
+  #collapse list to a vector
+  allsigdrugs<-unlist(allsigdrugspatientlist,use.names = F)
+  
+  #get frequency of top drugs across patients
+  freqTable<-table(allsigdrugs)
+  
+  #order frequency
+  ord<-order(freqTable)  
+  
+  #order table
+  ordtab<-freqTable[ord]
+  
+  #get top (by threshold) drugs across patients from specified threshold within patients
+  h<-tail(ordtab,n=top)
+  
+  #extract drug names in reverse
+  n<-rev(names(h))
+  
+  return(n)
+}
+```
+
+**The output of the SynGen analyses are estimated single agent drugs and estimated synergistic drug combinations within a list. I want to search existing literature to see if these predictions have been investigated previously. Also, I want to see if our predictions are under current investigation within a clinical trial.**
+
+##Literature search of top estimated drugs and synergistic drug combinations across all patients.
+
+**So first, I want to obtain those single agent drugs or drug combinations that are frequently estimated as effective or synergistic, respectively, for many patients with GBM.**
+
+```{r, echo=TRUE,eval=TRUE}
+#
+#initialize patient list
+patients<-pd_gbm_rpkm_wo5
+#obtaining top frequent single agent drugs
+sadrugs<-topFreq(patients,5) 
+
+#obtaining top frequent synergistic drug combinations
+n<-5
+topDrugCombosInPatients<-unlist(lapply(patients,
+  function(x){
+    head(names(x$sydrugs),n=n)
+  }
+),use.names = F)
+
+#getting the frequency of the drug combos identified and ordering
+tab<-table(topDrugCombosInPatients)
+ordtab<-order(tab)
+ordTableTopDrugCombos<-tab[ordtab]
+
+#obtaining top synergistic drug combo names, then reformatting for subsequent
+#pubmed searching
+namesTopDrugCombos<-names(tail(ordTableTopDrugCombos,n=n))
+DrugsInCombosList<-lapply(namesTopDrugCombos,function(x){str<-strsplit(x," x ")})
+TopDrugCombosKeywords<-sapply(DrugsInCombosList,
+  function(x){
+  lapply(x,function(x){
+    paste0(x[1]," AND ",x[2])}
+    )
+  }
+)
+
+```
+
+**Now that I have my frequent single agent drugs and synergistic drug combinations, I use them as keywords to my pubmed searches using functions from the *RISMed* package.**
+
+```{r, echo=TRUE, eval=TRUE}
+#establishing drugs as the keywords
+keywordsTopDrugs<-sadrugs
+keywordsTopDrugCombos<-rev(unlist(TopDrugCombosKeywords))
+```
+
+**Each search only takes one keyword so I loop through each drug or drug combination in the vectors and save each of their results in a list.**
+```{r,echo=TRUE,eval=TRUE}
+#
+#Searching single agent drugs
+#
+#initializing extra parameters
+abstractThresh=T #T for single agent drugs
+additional=T
+minyear<-2010
+maxyear<-2017
+phrase<-" AND (cancer OR tumor OR therapy)"
+#phrase<-" AND glioblastoma"
+#phrase<-" AND combination"
+loopThrough=keywordsTopDrugs 
+topDrugsList<-NULL
+#
+#looping through each keyword to get pubmed articles
+for(i in 1:length(loopThrough)){
+  if(additional){
+    word<-loopThrough[i]
+    totphrase<-paste0(word,phrase)
+    search_query <- EUtilsSummary(
+    totphrase, retmax=100, mindate=minyear, maxdate=maxyear)
+  }
+  else{
+    word<-loopThrough[i]
+    search_query <- EUtilsSummary(
+    word, retmax=100, mindate=minyear, maxdate=maxyear)
+  }
+#summary(search_query)
+records<- EUtilsGet(search_query)
+pubmed_data <- data.frame('Title'=ArticleTitle(records),'Abstract'=AbstractText(records),
+                          "Year"=YearPpublish(records),"Affiliation"=Affiliation(records),
+                          "PMID"=PMID(records))
+  if(abstractThresh==T){
+  inds.w.keyword<-grep(word,pubmed_data$Abstract,fixed=F)
+  topDrugsList[[i]]<-pubmed_data[inds.w.keyword,]
+  }else{
+    topDrugsList[[i]]<-pubmed_data}
+  }
+names(topDrugsList)<-loopThrough
+#
+
+#
+#Searching synergistic drug combinations
+#
+#initializing extra parameters
+abstractThresh=F
+additional=F
+minyear<-2010
+maxyear<-2017
+phrase<-" AND (cancer OR tumor OR therapy)"
+#phrase<-" AND glioblastoma"
+#phrase<-" AND combination"
+loopThrough=keywordsTopDrugCombos
+topDrugCombosList<-NULL
+#
+#looping through each keyword to get pubmed articles
+for(i in 1:length(loopThrough)){
+  phrase=""
+  if(additional){
+    word<-loopThrough[i]
+    totphrase<-paste0(word,phrase)
+    search_query <- EUtilsSummary(
+    totphrase, retmax=100, mindate=minyear, maxdate=maxyear)
+  }
+  else{
+    word<-loopThrough[i]
+    search_query <- EUtilsSummary(
+    word, retmax=100, mindate=minyear, maxdate=maxyear)
+  }
+#summary(search_query)
+records<- EUtilsGet(search_query)
+pubmed_data <- data.frame('Title'=ArticleTitle(records),'Abstract'=AbstractText(records),
+                          "Year"=YearPpublish(records),"Affiliation"=Affiliation(records),
+                          "PMID"=PMID(records))
+  if(abstractThresh==T){
+    terms<-unlist(strsplit(word," AND "))
+    inds1<-grep(terms[1],pubmed_data$Abstract,fixed=F,ignore.case = T)
+    inds2<-grep(terms[2],pubmed_data$Abstract,fixed=F,ignore.case = T)
+    inds.w.keyword<-intersect(inds1,inds2)
+    topDrugCombosList[[i]]<-pubmed_data[inds.w.keyword,]
+  }else{
+    topDrugCombosList[[i]]<-pubmed_data}
+  }
+names(topDrugCombosList)<-loopThrough
+#
+```
+
+**Now I can see how many articles for each keyword my search to pubmed yielded**
+```{r,echo=TRUE,eval=TRUE}
+#number of articles in lists
+cat("\ntopDrugsList")
+lapply(topDrugsList,nrow)
+cat("\ntopDrugCombosList")
+lapply(topDrugCombosList,nrow)
+```
+
+**Moreover, I can also see what are the article titles for each keyword, search for the pmid to read more closely in the browser, and investigate which patients these drugs are estimated to have the most efficacious response. But I would also like to see more contemporaneous and potentially more relevant information about their efficacy and investigation in treating cancers in patients.**
+
+##Searching clinicaltrials.gov for our predictions.
+
+**The package *rclinicaltrials* is a development R package on github that allows you to directly query the clinicaltrials.gov browser for all registered trials with a keyword.**
+
+**First, I need to set up the environment.**
+```{r,eval=T,echo=T}
+#install.packages("devtools")
+library(devtools)
+#install_github("sachsmc/rclinicaltrials")
+library(rclinicaltrials)
+```
+
+**I want to query each predicted drug in clinicaltrials.gov.**
+```{r,eval=T,echo=T}
+loopThrough=keywordsTopDrugs 
+drugsInTrials<-NULL
+names<-c()
+for(i in 1:length(loopThrough)){
+  drug<-loopThrough[i]
+  if(clinicaltrials_count(drug)>0){
+      phrase<-" AND (cancer OR tumor OR therapy)"
+      phrase<-paste(drug,phrase)
+      drugsInTrials[[length(drugsInTrials)+1]]<-clinicaltrials_download(phrase,count=NULL)
+      names<-c(names,drug)
+  }else{
+    drugsInTrials[[length(drugsInTrials)+1]]<-list("study_info"=data.frame())
+      names<-c(names,drug)
+  }
+}
+names(drugsInTrials)<-names
+
+loopThrough=keywordsTopDrugCombos
+drugCombosInTrials<-NULL
+names<-c()
+for(i in 1:length(loopThrough)){
+  drugs<-loopThrough[i]
+  if(clinicaltrials_count(drugs)>0){
+      phrase<-""
+      query<-paste(drugs,phrase)
+      drugCombosInTrials[[length(drugCombosInTrials)+1]]<-clinicaltrials_download(query,count=NULL)
+      names<-c(names,drug)
+  }
+}
+names(drugCombosInTrials)<-names
+```
+
+**And how many studies do I find?**
+```{r,echo=T,eval=T}
+cat("\ntopDrugsList")
+lapply(drugsInTrials,function(x){nrow(x$study_info)})
+cat("\ntopDrugCombosList")
+lapply(drugCombosInTrials,function(x){nrow(x$study_info)})
+```
+
+**Again, I don't have any results for both drugs in the predicted synergistic pair. However I do have hits for the single agents. There are many avvenues to take, but one is to compare the number of articles found in pubmed and compare that to the number of trials found using that drug.**
+```{r,echo=T,eval=T}
+df<-data.frame(
+  numArticles=unlist(lapply(topDrugsList,nrow),use.names=F),
+  numTrials=unlist(lapply(drugsInTrials,function(x){nrow(x$study_info)}),use.names = F)
+)
+rownames(df)<-names(drugsInTrials)
+df
+```
+
+**There are many ways to integrate and investigate these search results, but for this brief tutorial I'm just going to point out to things I see from the data frame. 1) FK866, though published the most frequently of these top drugs, has 0 trials registered. 2) Trametenib, with 14 previous articles in the last 7 years, is used within 130 registered clinical trials.**
+
+**Potentially, I could look into synonyms for FK866 and see if trials are registered for the synonyms, and also look into the diseases in which Trametinib. FK866 is an experimental drug and doesn't have a registered synonym that could be found in clinicaltrials.gov, so this may indicate how though articles are being published on this drug, clinical trials are not yet in progress. In the case of Trametenib, we can now ask what are the statuses of these studies e.g. whether the trials are ongoing or recruiting.**
+```{r,eval=T,echo=T}
+table(drugsInTrials$Trametinib$study_info$overall_status)
+```
+
+**Of the completed trials, what were the titles of the trials? this can give an indication of what tumor type trametinib, and possibly in drug combinations, is effective**
+```{r,eval=T,echo=T}
+subset(drugsInTrials$Trametinib$study_info, overall_status=="Completed")$official_title
+```
+

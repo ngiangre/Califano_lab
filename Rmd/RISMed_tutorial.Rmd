@@ -1,0 +1,432 @@
+---
+title: "Pubmed searching with RISMed"
+author: by Nick Giangreco
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Literature searches within R
+
+**The package RISMed allows you to do pubmed, or any NCBI database, searches with results from R seamlessly within the R environment. This tutorial will go through how I used the package to search drugs and synergistic drug combinations resulting from the SynGen analyses.**
+
+**I first set my environment and load my data,**
+
+```{r, echo=TRUE, eval=TRUE}
+#install.packages("RISmed")
+library(RISmed)
+load("Z:/npg2108/RDAs/syngenv2.RDa")
+#load("/Volumes/ac_lab_scratch/npg2108/RDAs/syngenv2.RDa")
+```
+```{r,echo=FALSE,eval=TRUE}
+#####functions#####
+topFreq<-function(syngen,top){
+  
+  #across all patients, get top 5 drugs estimated for highest estimated inversion of the tumor sigtnature
+  allsigdrugspatientlist<-lapply(syngen,function(x){
+      #get drug names from syngen data frames for each patient
+      drugs<-rownames(x$phdrugs)
+      head(drugs,n=top)
+  })
+  
+  #collapse list to a vector
+  allsigdrugs<-unlist(allsigdrugspatientlist,use.names = F)
+  
+  #get frequency of top drugs across patients
+  freqTable<-table(allsigdrugs)
+  
+  #order frequency
+  ord<-order(freqTable)  
+  
+  #order table
+  ordtab<-freqTable[ord]
+  
+  #get top (by threshold) drugs across patients from specified threshold within patients
+  h<-tail(ordtab,n=top)
+  
+  #extract drug names in reverse
+  n<-rev(names(h))
+  
+  return(n)
+}
+```
+
+**The output of the SynGen analyses are estimated single agent drugs and estimated synergistic drug combinations within a list. I want to search existing literature to see if these predictions have some previous support from the research community as being effective drug treatments and act synergistically for treatment, respectively.**
+
+##Literature search of top estimated drugs and synergistic drug combinations across all patients.
+
+**So first, I want to obtain those single agent drugs or drug combinations that are frequently estimated as effective or synergistic, respectively, for many patients with GBM.**
+
+```{r, echo=TRUE,eval=TRUE}
+#
+#initialize patient list
+patients<-pd_gbm_rpkm_wo5
+#obtaining top frequent single agent drugs
+sadrugs<-topFreq(patients,5) 
+
+#obtaining top frequent synergistic drug combinations
+n<-5
+topDrugCombosInPatients<-unlist(lapply(patients,
+  function(x){
+    head(names(x$sydrugs),n=n)
+  }
+),use.names = F)
+
+#getting the frequency of the drug combos identified and ordering
+tab<-table(topDrugCombosInPatients)
+ordtab<-order(tab)
+ordTableTopDrugCombos<-tab[ordtab]
+
+#obtaining top synergistic drug combo names, then reformatting for subsequent
+#pubmed searching
+namesTopDrugCombos<-names(tail(ordTableTopDrugCombos,n=n))
+DrugsInCombosList<-lapply(namesTopDrugCombos,function(x){str<-strsplit(x," x ")})
+TopDrugCombosKeywords<-sapply(DrugsInCombosList,
+  function(x){
+  lapply(x,function(x){
+    paste0(x[1]," AND ",x[2])}
+    )
+  }
+)
+
+```
+
+**Now that I have my frequent single agent drugs and synergistic drug combinations, I use them as keywords to my pubmed searches using functions from the *RISMed* package.**
+
+```{r, echo=TRUE, eval=TRUE}
+#establishing drugs as the keywords
+keywordsTopDrugs<-sadrugs
+keywordsTopDrugCombos<-rev(unlist(TopDrugCombosKeywords))
+```
+
+**Each search only takes one keyword (haven't figured out yet how to do more than one keyword per search). Because of this, I loop through each drug or drug combination in the vectors and save each of their results in a list.**
+
+**I use two parameters for filtering the search in pubmed, primarily when querying predicted single agent drugs. First, for asking whether the drug name is not only referenced in the article but also the abstract, I have an *abstractThresh* logical indicated for single agent drugs but not drug combinations. Second, for asking whether extra terms (i.e. cancer, tumor or therapy) are associated in the searches I indicate the logical *additional* as another phrase when searching in pubmed. In the end, I run the loop individually for either searching the single agent drugs or the drug combinations.**
+
+**The summary function will yield the actual query to pubmed, based on the keyword. The EUtils wrapper function will output the query results number.**
+```{r,echo=TRUE,eval=TRUE}
+#
+#Searching single agent drugs
+#
+#initializing extra parameters
+abstractThresh=T #T for single agent drugs
+additional=T
+minyear<-2010
+maxyear<-2017
+phrase<-" AND (cancer OR tumor OR therapy)"
+#phrase<-" AND glioblastoma"
+#phrase<-" AND combination"
+loopThrough=keywordsTopDrugs 
+topDrugsList<-NULL
+#
+#looping through each keyword to get pubmed articles
+for(i in 1:length(loopThrough)){
+  if(additional){
+    word<-loopThrough[i]
+    totphrase<-paste0(word,phrase)
+    search_query <- EUtilsSummary(
+    totphrase, retmax=100, mindate=minyear, maxdate=maxyear)
+  }
+  else{
+    word<-loopThrough[i]
+    search_query <- EUtilsSummary(
+    word, retmax=100, mindate=minyear, maxdate=maxyear)
+  }
+#summary(search_query)
+records<- EUtilsGet(search_query)
+pubmed_data <- data.frame('Title'=ArticleTitle(records),'Abstract'=AbstractText(records),
+                          "Year"=YearPpublish(records),"Affiliation"=Affiliation(records),
+                          "PMID"=PMID(records))
+  if(abstractThresh==T){
+  inds.w.keyword<-grep(word,pubmed_data$Abstract,fixed=F)
+  topDrugsList[[i]]<-pubmed_data[inds.w.keyword,]
+  }else{
+    topDrugsList[[i]]<-pubmed_data}
+  }
+names(topDrugsList)<-loopThrough
+#
+
+#
+#Searching synergistic drug combinations
+#
+#initializing extra parameters
+abstractThresh=F
+additional=F
+minyear<-2010
+maxyear<-2017
+phrase<-" AND (cancer OR tumor OR therapy)"
+#phrase<-" AND glioblastoma"
+#phrase<-" AND combination"
+loopThrough=keywordsTopDrugCombos
+topDrugCombosList<-NULL
+#
+#looping through each keyword to get pubmed articles
+for(i in 1:length(loopThrough)){
+  phrase=""
+  if(additional){
+    word<-loopThrough[i]
+    totphrase<-paste0(word,phrase)
+    search_query <- EUtilsSummary(
+    totphrase, retmax=100, mindate=minyear, maxdate=maxyear)
+  }
+  else{
+    word<-loopThrough[i]
+    search_query <- EUtilsSummary(
+    word, retmax=100, mindate=minyear, maxdate=maxyear)
+  }
+#summary(search_query)
+records<- EUtilsGet(search_query)
+pubmed_data <- data.frame('Title'=ArticleTitle(records),'Abstract'=AbstractText(records),
+                          "Year"=YearPpublish(records),"Affiliation"=Affiliation(records),
+                          "PMID"=PMID(records))
+  if(abstractThresh==T){
+    terms<-unlist(strsplit(word," AND "))
+    inds1<-grep(terms[1],pubmed_data$Abstract,fixed=F,ignore.case = T)
+    inds2<-grep(terms[2],pubmed_data$Abstract,fixed=F,ignore.case = T)
+    inds.w.keyword<-intersect(inds1,inds2)
+    topDrugCombosList[[i]]<-pubmed_data[inds.w.keyword,]
+  }else{
+    topDrugCombosList[[i]]<-pubmed_data}
+  }
+names(topDrugCombosList)<-loopThrough
+#
+```
+
+**Now I can see how many articles for each keyword my search to pubmed yielded**
+```{r,echo=TRUE,eval=TRUE}
+#number of articles in lists
+cat("\ntopDrugsList")
+lapply(topDrugsList,nrow)
+cat("\ntopDrugCombosList")
+lapply(topDrugCombosList,nrow)
+```
+**The usefulness of literature searching is finding previous evidence for our predictions. Unfortunately, if we determine our predictions as false if nothing results from the literature search, we are not adjusting for our predictions not being present in the existing literature. This would, therefore, yield false negatives (misses). This also would yield false positives, but given literature are peer-reviewed, we'll concede to the fact that false positives are inherently less than false negatives in this context.**
+
+
+**Moreover, I can also see what are the article titles for each keyword**
+```{r,echo=TRUE,eval=TRUE}
+cat("\ntopDrugsList")
+lapply(topDrugsList,function(x){if(nrow(x)>0){as.character(x$Title)}})
+cat("\ntopDrugCombosList")
+lapply(topDrugCombosList,function(x){if(nrow(x)>0){as.character(x$Title)}})
+```
+
+**And if I want to look up some articles in the browser,**
+
+```{r,echo=TRUE,eval=TRUE}
+cat("\ntopDrugsList")
+lapply(topDrugsList,function(x){
+  if(nrow(x)>0){
+    data.frame(
+      "Title"=as.character(x$Title),
+      "PMID"=as.character(x$PMID))
+    }
+  }
+)
+#
+cat("\ntopDrugsList")
+lapply(topDrugCombosList,function(x){
+  if(nrow(x)>0){
+    data.frame(
+      "Title"=as.character(x$Title),
+      "PMID"=as.character(x$PMID))
+    }
+  }
+)
+```
+
+**Now I want to link back to the patients that picked those as top estimators.**
+```{r,echo=T,eval=T}
+#
+#Linking single agent drugs back to particular patients
+#
+#drug to identify-first in original vector
+drug<-keywordsTopDrugs[1]
+#applying through list for sorafenib as top drug estimator
+list<-lapply(patients,function(x){
+  #may need to change conditions in the 'if' statement to get patients
+  if(rownames(x$phdrugs)[2]==drug){
+    TRUE
+  }else{
+      FALSE
+    }
+  }
+)
+#showing patients that meet the above conditions, in this case showing the top drug as the first or second highest estimated single agent drug
+names(which(unlist(list)))
+
+#
+#Linking synergistic drug combinations back to particular patients
+#
+#drug combo to identify
+drugcombo<-keywordsTopDrugCombos[3]
+drugcombo<-gsub("AND","x",drugcombo)
+#applying through list for the drug combo as top drug estimator
+list<-lapply(pd_gbm_rpkm_wo5,function(x){
+  #May need to change 'if' statement to get patients
+  if(names(x$sydrugs)[2]==drugcombo){
+    TRUE
+  }else{
+      FALSE
+    }
+  }
+)
+#Show the patients that meet the conditions above, in this case showing this drug combo in the top 4 highest synergy.
+cat(drugcombo,"\n")
+names(which(unlist(list)))
+#
+#drug combo to identify
+drugcombo<-keywordsTopDrugCombos[5]
+drugcombo<-gsub("AND","x",drugcombo)
+#applying through list for the drug combo as top drug estimator
+list<-lapply(pd_gbm_rpkm_wo5,function(x){
+  #May need to change 'if' statement to get patients
+  if(names(x$sydrugs)[2]==drugcombo){
+    TRUE
+  }else{
+      FALSE
+    }
+  }
+)
+#Show the patients that meet the conditions above, in this case showing this drug combo in the top 4 highest synergy.
+cat(drugcombo,"\n")
+names(which(unlist(list)))
+```
+
+##Literature search for estimated single agent drugs and syngergistic drug combinations for a given patient
+
+**Let's say I'm interested in seeing if there were previous or are current investigations for the top drugs or drug comnbinations predicted.**
+
+```{r,echo=TRUE,eval=TRUE}
+#
+#For patient, what are the top drugs and drug combinations?
+name<-"GBM108"
+sadrugs<-head(rownames(patients[[name]]$phdrugs),n=5)
+#
+#extra pre-processing for drug combos as above
+namesTopDrugCombos<-head(names(patients[[name]]$sydrugs),n=5)
+DrugsInCombosList<-lapply(namesTopDrugCombos,function(x){str<-strsplit(x," x ")})
+TopDrugCombosKeywords<-sapply(DrugsInCombosList,
+  function(x){
+  lapply(x,function(x){
+    paste0(x[1]," AND ",x[2])}
+    )
+  }
+)
+```
+
+**As above, now that I have my frequent single agent drugs and synergistic drug combinations for ths patient, I use them as keywords to my pubmed searches using functions from the *RISMed* package.**
+
+```{r, echo=TRUE, eval=TRUE}
+#establishing drugs as the keywords
+keywordsTopDrugs<-sadrugs
+keywordsTopDrugCombos<-unlist(TopDrugCombosKeywords)
+```
+
+**I can run my searches as above,**
+```{r,echo=TRUE,eval=TRUE}
+#
+#Searching single agent drugs
+#
+#initializing extra parameters
+abstractThresh=T #T for single agent drugs
+additional=T
+minyear<-2010
+maxyear<-2017
+#phrase<-" AND (cancer OR tumor OR therapy)"
+phrase<-" AND glioblastoma"
+#phrase<-" AND combination"
+loopThrough=keywordsTopDrugs 
+topDrugsList<-NULL
+#
+#looping through each keyword to get pubmed articles
+for(i in 1:length(loopThrough)){
+  if(additional){
+    word<-loopThrough[i]
+    newphrase<-paste0(word,phrase)
+    search_query <- EUtilsSummary(
+    newphrase, retmax=100, mindate=minyear, maxdate=maxyear)
+  }
+  else{
+    word<-loopThrough[i]
+    search_query <- EUtilsSummary(
+    word, retmax=100, mindate=minyear, maxdate=maxyear)
+  }
+#summary(search_query)
+records<- EUtilsGet(search_query)
+pubmed_data <- data.frame('Title'=ArticleTitle(records),
+              'Abstract'=AbstractText(records),"Year"=YearPpublish(records),
+              "Affiliation"=Affiliation(records),"PMID"=PMID(records))
+  if(abstractThresh==T){
+    inds.w.keyword<-grep(word,pubmed_data$Abstract,fixed=F)
+    topDrugsList[[i]]<-pubmed_data[inds.w.keyword,]
+  }else{
+    topDrugsList[[i]]<-pubmed_data}
+  }
+names(topDrugsList)<-loopThrough
+#
+
+#
+#Searching synergistic drug combinations
+#
+#initializing extra parameters
+abstractThresh=F
+additional=F
+minyear<-2010
+maxyear<-2017
+phrase<-" AND (cancer OR tumor OR therapy)"
+#phrase<-" AND glioblastoma"
+#phrase<-" AND combination"
+loopThrough=keywordsTopDrugCombos
+topDrugCombosList<-NULL
+#
+#looping through each keyword to get pubmed articles
+for(i in 1:length(loopThrough)){
+  if(additional){
+    word<-loopThrough[i]
+    newphrase<-paste0(word,phrase)
+    search_query <- EUtilsSummary(
+    newphrase, retmax=100, mindate=minyear, maxdate=maxyear)
+  }
+  else{
+    word<-loopThrough[i]
+    search_query <- EUtilsSummary(
+    word, retmax=100, mindate=minyear, maxdate=maxyear)
+  }
+#summary(search_query)
+records<- EUtilsGet(search_query)
+pubmed_data <- data.frame('Title'=ArticleTitle(records),'Abstract'=AbstractText(records),
+                          "Year"=YearPpublish(records),"Affiliation"=Affiliation(records),
+                          "PMID"=PMID(records))
+  if(abstractThresh==T){
+    terms<-unlist(strsplit(word," AND "))
+    inds1<-grep(terms[1],pubmed_data$Abstract,fixed=F,ignore.case = T)
+    inds2<-grep(terms[2],pubmed_data$Abstract,fixed=F,ignore.case = T)
+    inds.w.keyword<-intersect(inds1,inds2)
+  topDrugCombosList[[i]]<-pubmed_data[inds.w.keyword,]
+  }else{
+    topDrugCombosList[[i]]<-pubmed_data}
+  }
+names(topDrugCombosList)<-loopThrough
+#
+```
+
+**Now I can see how many articles for each keyword my search to pubmed yielded**
+```{r,echo=TRUE,eval=TRUE}
+#number of articles in lists
+cat("\ntopDrugsList")
+lapply(topDrugsList,nrow)
+cat("\ntopDrugCombosList")
+lapply(topDrugCombosList,nrow)
+```
+
+**For this patient and under the parameters used, I obtained only 3 articles for Gemcitabine and 3 articles for FK866 X Gemcitabine. Let's see the article titles,**
+
+```{r,echo=TRUE,eval=TRUE}
+cat("\ntopDrugsList")
+lapply(topDrugsList,function(x){if(nrow(x)>0){as.character(x$Title)}})
+cat("\ntopDrugCombosList")
+lapply(topDrugCombosList,function(x){if(nrow(x)>0){as.character(x$Title)}})
+```
